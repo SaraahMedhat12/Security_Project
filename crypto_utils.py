@@ -15,9 +15,6 @@ from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 # Note: cryptography library doesn't expose Argon2id hash(). We'll simulate.
 
 def hash_password(password, salt=None):
-    """
-    Derives a password hash using PBKDF2 (placeholder for Argon2id until Phase 2).
-    """
     if salt is None:
         salt = secrets.token_bytes(16)
     kdf = PBKDF2HMAC(
@@ -31,9 +28,6 @@ def hash_password(password, salt=None):
     return hashed_password, salt
 
 def verify_password(password, hashed_password, salt):
-    """
-    Verifies password using PBKDF2.
-    """
     try:
         kdf = PBKDF2HMAC(
             algorithm=hashes.SHA256(),

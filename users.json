@@ -1,0 +1,10 @@
+{
+  "sara": {
+    "hashed_pw": "1582c62cc120b9492dc3eb0dde597bec36166a09c9a775f773b83194e50ce932",
+    "salt": "3b36b56b5b1d6b039f392d009b4dfbe4"
+  },
+  "judy": {
+    "hashed_pw": "b75ca30c64baa2c3ab4c820662468a09372109df53ad7a57ada3ecf7870f5c7a",
+    "salt": "11c8d1e04802eb8745a350b3d7af5c3a"
+  }
+}
