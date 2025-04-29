@@ -6,5 +6,12 @@
   "judy": {
     "hashed_pw": "b75ca30c64baa2c3ab4c820662468a09372109df53ad7a57ada3ecf7870f5c7a",
     "salt": "11c8d1e04802eb8745a350b3d7af5c3a"
-  }
-}
+  },
+  "aya": {
+    "hashed_pw": "3613928ca3a2b21bda297b1b6383a5bfbfc8020260fd4db314edc8441e4cf005",
+    "salt": "d8765fef92f04488bd5ecb6f43cfb5ea"
+  },
+  "Sarah": {
+    "hashed_pw": "284fe8afc3e32a18a743e5881267a5fe9d9cb9fa502d18ec0647baadef4e5f61",
+    "salt": "da3a5d6bced102a4e3be120487829b16"
+  }}
