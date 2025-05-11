@@ -1,0 +1,8 @@
+{
+  "test.txt": {
+    "owner": "saraaa",
+    "allowed_users": [
+      "judyyy"
+    ]
+  }
+}
