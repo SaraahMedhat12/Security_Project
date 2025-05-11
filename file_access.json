@@ -2,7 +2,19 @@
   "test.txt": {
     "owner": "saraaa",
     "allowed_users": [
+      "medhat"
+    ]
+  },
+  "test2.txt": {
+    "owner": "saraaa",
+    "allowed_users": [
       "judyyy"
+    ]
+  },
+  "test3.txt": {
+    "owner": "medhat",
+    "allowed_users": [
+      "saraaa"
     ]
   }
 }

@@ -3,6 +3,8 @@ import os
 import tkinter as tk
 from tkinter import simpledialog, messagebox, filedialog
 import crypto_utils  
+import json
+import base64
 
 HOST = '127.0.0.1'
 PORT = 8000
@@ -10,6 +12,7 @@ PORT = 8000
 session_token = None
 username = None
 derived_key = None  # 🔑 Store the per-user derived encryption key
+FILE_KEYS_PATH = "file_keys.json"
 
 PINK = "#f8c8dc"
 WHITE = "#ffffff"
@@ -46,18 +49,49 @@ def show_auth_dialog(title):
     popup.wait_window()
     return result["username"], result["password"]
 
+def save_encrypted_file_key(filename, file_key, allowed_users):
+    if os.path.exists(FILE_KEYS_PATH):
+        with open(FILE_KEYS_PATH, "r") as f:
+            file_keys = json.load(f)
+    else:
+        file_keys = {}
+
+    encrypted_keys = {}
+    salt = b'static_salt_16bytes'
+    for user in allowed_users:
+        user_key = crypto_utils.derive_key_from_password(user, salt)
+        encrypted_key = crypto_utils.encrypt_data(user_key, file_key)
+        encrypted_keys[user] = base64.b64encode(encrypted_key).decode()
+
+    file_keys[filename] = {"keys": encrypted_keys}
+
+    with open(FILE_KEYS_PATH, "w") as f:
+        json.dump(file_keys, f, indent=2)
+
+def load_encrypted_file_key(filename, derived_key, username):
+    if not os.path.exists(FILE_KEYS_PATH):
+        raise ValueError("File key database not found.")
+    with open(FILE_KEYS_PATH, "r") as f:
+        file_keys = json.load(f)
+    if filename not in file_keys or username not in file_keys[filename]["keys"]:
+        raise ValueError(f"No key entry for user '{username}' and file '{filename}'")
+
+    encrypted_key_b64 = file_keys[filename]["keys"][username]
+    encrypted_key = base64.b64decode(encrypted_key_b64)
+    return crypto_utils.decrypt_data(derived_key, encrypted_key)
+
 def register():
     global username
     s = connect_to_server()
     s.sendall(b"REGISTER")
-    s.recv(1024)  # USERNAME:
+    s.recv(1024)
     u, p = show_auth_dialog("Register")
     if not u or not p:
         s.close()
         return
     username = u
     s.sendall(u.encode())
-    s.recv(1024)  # PASSWORD:
+    s.recv(1024)
     s.sendall(p.encode())
     response = s.recv(1024).decode()
     s.close()
@@ -71,31 +105,25 @@ def login():
 
     s = connect_to_server()
     s.sendall(b"LOGIN")
-    s.recv(1024)  # USERNAME:
+    s.recv(1024)
     u, p = show_auth_dialog("Login")
     if not u or not p:
         s.close()
         return
     username = u
     s.sendall(u.encode())
-    s.recv(1024)  # PASSWORD:
+    s.recv(1024)
     s.sendall(p.encode())
     response = s.recv(2048).decode()
-
-    # 🔑 Derive encryption key from password
-    salt = b'static_salt_16bytes'  # ⚠️ Must match the server salt
+    salt = b'static_salt_16bytes'
     derived_key = crypto_utils.derive_key_from_password(p, salt)
     print(f"[DEBUG] Login: username: {username}")
-    print(f"[DEBUG] Using salt: {salt}")
     print(f"[DEBUG] Derived encryption key (hex): {derived_key.hex()}")
-
     s.close()
     if "SESSION_TOKEN:" in response:
         session_token = response.split("SESSION_TOKEN:")[1].strip()
-        print(f"[DEBUG] Session token received: {session_token}")  # NEW DEBUG
         os.makedirs(f"received_files_{username}", exist_ok=True)
         messagebox.showinfo("Login", f"\U0001F389 Login successful!\n\nSession Token:\n{session_token}")
-
         status_label.config(text=f"Logged in as: {username}", fg="green")
     else:
         messagebox.showerror("Login Failed", response)
@@ -108,7 +136,7 @@ def list_files():
     s.sendall(f"LIST {session_token}".encode())
     response = s.recv(4096).decode()
     s.close()
-    print(f"[DEBUG] Files listed from server: {response}")  # NEW DEBUG
+    print(f"[DEBUG] Files listed from server: {response}")
     messagebox.showinfo("Files on Server", response)
 
 def upload_file(server_ip, port, token, filepath, allowed_users):
@@ -117,25 +145,23 @@ def upload_file(server_ip, port, token, filepath, allowed_users):
         return
 
     filename = os.path.basename(filepath)
-
-    # Step 1: Read original data (raw data from the file)
     with open(filepath, "rb") as f:
         raw_data = f.read()
     print(f"[DEBUG] Uploading file: {filename}")
-    print(f"[DEBUG] Original file size: {len(raw_data)} bytes")  # [DEBUG]
+    print(f"[DEBUG] Original file size: {len(raw_data)} bytes")
 
-    # Step 2: Encrypt the data before sending using derived key
-    encrypted_data = crypto_utils.encrypt_data(derived_key, raw_data)
-    print(f"[DEBUG] Encrypted data size: {len(encrypted_data)} bytes")  # [DEBUG]
-    print("[DEBUG] File encrypted successfully before upload.")  # [DEBUG]
-    print(f"[DEBUG] Upload: using derived key: {derived_key.hex()}")  # [DEBUG]
+    file_key = os.urandom(32)
+    save_encrypted_file_key(filename, file_key, allowed_users.split(","))
+    print(f"[DEBUG] File key encrypted and saved for {filename}.")
 
-    # Step 3: Save the original (raw) file content locally in "shared_files_username"
+    encrypted_data = crypto_utils.encrypt_data(file_key, raw_data)
+    print(f"[DEBUG] Encrypted data size: {len(encrypted_data)} bytes")
+    print("[DEBUG] File encryption completed successfully.")
+
     os.makedirs(f"shared_files_{username}", exist_ok=True)
     with open(os.path.join(f"shared_files_{username}", filename), 'wb') as f:
         f.write(raw_data)
 
-    # Step 4: Save hash of original (not encrypted) file locally
     file_hash = crypto_utils.hash_data(raw_data)
     os.makedirs("hashes", exist_ok=True)
     hash_file_path = os.path.join("hashes", filename + ".hash")
@@ -143,7 +169,6 @@ def upload_file(server_ip, port, token, filepath, allowed_users):
         f.write(file_hash)
     print(f"[DEBUG] Hash saved at: {hash_file_path}")
 
-    # Step 5: Send the encrypted file to the server
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.connect((server_ip, port))
         sock.sendall(f"UPLOAD {token} {filename}\n".encode())
@@ -151,7 +176,7 @@ def upload_file(server_ip, port, token, filepath, allowed_users):
         response = sock.recv(1024).decode()
         if "Enter usernames" in response:
             sock.sendall(f"{allowed_users}\n".encode())
-            print(f"[DEBUG] Allowed users sent to server: {allowed_users}")  # NEW DEBUG
+            print(f"[DEBUG] Allowed users sent to server: {allowed_users}")
 
         ready = sock.recv(1024).decode()
         if "READY" in ready:
@@ -176,7 +201,7 @@ def upload():
 
     try:
         upload_file(HOST, PORT, session_token, filepath, allowed_users)
-        messagebox.showinfo("Upload", f"✅ File uploaded successfully.")
+        messagebox.showinfo("Upload", f"✅ File uploaded and encrypted successfully.")
     except Exception as e:
         messagebox.showerror("Upload Error", str(e))
 
@@ -201,33 +226,17 @@ def download():
         messagebox.showerror("Download", data.decode())
     else:
         try:
-            print(f"[DEBUG] Encrypted file size received: {len(data)} bytes")  # [DEBUG]
-            decrypted = crypto_utils.decrypt_data(derived_key, data)
-            print(f"[DEBUG] Decrypted file size: {len(decrypted)} bytes")      # [DEBUG]
-            print("[DEBUG] File decrypted successfully after download.")        # [DEBUG]
-            print(f"[DEBUG] Download: using derived key: {derived_key.hex()}")  # [DEBUG]
-
-            downloaded_hash = crypto_utils.hash_data(decrypted)
-
-            hash_path = os.path.join("hashes", filename + ".hash")
-            print(f"[DEBUG] Looking for hash file at: {hash_path}")
-            if os.path.exists(hash_path):
-                with open(hash_path, 'rb') as f:
-                    expected = f.read()
-                if downloaded_hash != expected:
-                    messagebox.showerror("Integrity Check", "❌ Integrity check failed!")
-                    print("[DEBUG] Integrity check FAILED.")                    # [DEBUG]
-                    return
-                else:
-                    print("[DEBUG] Integrity check passed!")                   # [DEBUG]
-            else:
-                messagebox.showwarning("Hash Missing", "⚠️ No stored hash found.")
-                print("[DEBUG] No stored hash file found.")
+            print(f"[DEBUG] Encrypted file size received: {len(data)} bytes")
+            file_key = load_encrypted_file_key(filename, derived_key, username)
+            print(f"[DEBUG] File key decrypted for user: {username}")
+            decrypted = crypto_utils.decrypt_data(file_key, data)
+            print(f"[DEBUG] Decrypted file size: {len(decrypted)} bytes")
+            print("[DEBUG] File decryption completed successfully.")
 
             os.makedirs(f"received_files_{username}", exist_ok=True)
             with open(os.path.join(f"received_files_{username}", filename), 'wb') as f:
                 f.write(decrypted)
-            messagebox.showinfo("Download", f"✅ File '{filename}' downloaded successfully.")
+            messagebox.showinfo("Download", f"✅ File '{filename}' decrypted and downloaded successfully.")
         except Exception as e:
             messagebox.showerror("Error", f"❌ Decryption or save failed: {str(e)}")
 
