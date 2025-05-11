@@ -4,24 +4,33 @@ import os
 import json
 import uuid
 import crypto_utils
-from user_manager import load_users, save_users
+import base64
 
-MASTER_PASSWORD = "pass"
+
 ACCESS_CONTROL_FILE = "file_access.json"
+USERS_FILE = "users.json"
 
 class FileSharePeer:
     def __init__(self, port):
         self.host = '0.0.0.0'
         self.port = port
         self.peer_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.users, self.key = load_users(MASTER_PASSWORD)
-        if self.users is None:
-            print("[FATAL] Failed to load users. Exiting.")
-            exit(1)
+        self.users = self.load_users_file()
         self.sessions = {}  # token => {username, key}
         self.logged_in_users = set()
         os.makedirs("shared_files", exist_ok=True)
         self.load_access_control()
+
+    def load_users_file(self):
+        if os.path.exists(USERS_FILE):
+            with open(USERS_FILE, "r") as f:
+                return json.load(f)
+        else:
+            return {}
+
+    def save_users_file(self):
+        with open(USERS_FILE, "w") as f:
+            json.dump(self.users, f, indent=2)
 
     def load_access_control(self):
         if os.path.exists(ACCESS_CONTROL_FILE):
@@ -36,9 +45,6 @@ class FileSharePeer:
     def save_access_control(self):
         with open(ACCESS_CONTROL_FILE, 'w') as f:
             json.dump(self.file_access, f, indent=2)
-
-    def save_users_securely(self):
-        save_users(self.users, self.key)
 
     def start_peer(self):
         self.peer_socket.bind((self.host, self.port))
@@ -71,9 +77,12 @@ class FileSharePeer:
                     if username in self.users:
                         sock.send(b"ERROR: Username already exists.")
                     else:
-                        hashed_pw = crypto_utils.argon2_hash_password(password)
-                        self.users[username] = {"argon2": hashed_pw}
-                        self.save_users_securely()
+                        hashed_pw, salt = crypto_utils.hash_password(password)
+                        self.users[username] = {
+                            "hashed_pw": hashed_pw,
+                            "salt": salt
+                        }
+                        self.save_users_file()
                         os.makedirs(f"shared_files_{username}", exist_ok=True)
                         sock.send(b"Registration successful.")
 
@@ -87,14 +96,15 @@ class FileSharePeer:
                     sock.send(b"PASSWORD:")
                     password = sock.recv(1024).decode().strip()
 
-                    if username not in self.users or "argon2" not in self.users[username]:
+                    if username not in self.users:
                         sock.send(b"ERROR: User not found.")
                     elif username in self.logged_in_users:
                         sock.send(b"ERROR: User already logged in elsewhere.\n")
                     else:
-                        hashed_pw = self.users[username]["argon2"]
-                        if crypto_utils.argon2_verify_password(password, hashed_pw):
-                            salt = b"static_salt_16bytes"
+                        entry = self.users[username]
+                        if crypto_utils.verify_password(password, entry["hashed_pw"], entry["salt"]):
+                            salt = bytes.fromhex(entry["salt"]) if len(entry["salt"]) == 32 else \
+                                base64.b64decode(entry["salt"])
                             session_key = crypto_utils.derive_key_from_password(password, salt)
 
                             token = str(uuid.uuid4())
@@ -177,13 +187,13 @@ class FileSharePeer:
                         continue
 
                     username = self.sessions[token]["username"]
+                    session_key = self.sessions[token]["key"]
                     user_dir = f"shared_files_{username}"
                     os.makedirs(user_dir, exist_ok=True)
 
                     filepath_global = os.path.join("shared_files", filename)
                     filepath_user = os.path.join(user_dir, filename)
 
-                    # Step 1: Ask for allowed users
                     sock.send(b"Enter usernames to share with (comma separated):")
                     allowed_data = sock.recv(2048).decode().strip()
                     allowed_users = [
@@ -191,10 +201,8 @@ class FileSharePeer:
                         if u.strip() in self.users and u.strip() != username
                     ]
 
-                    # Step 2: Tell client to send file
-                    sock.send(b"READY")  # Client sends file now
+                    sock.send(b"READY")
 
-                    # Step 3: Receive file data
                     file_data = b""
                     while True:
                         chunk = sock.recv(4096)
@@ -203,20 +211,17 @@ class FileSharePeer:
                         file_data += chunk
 
                     with open(filepath_global, 'wb') as f:
-                        f.write(file_data)  # encrypted version stored globally
+                        f.write(file_data)
 
                     try:
-                        decrypted_data = crypto_utils.decrypt_data(
-                            b'secure_shared_key_1234567890abcd', file_data
-                        )
+                        decrypted_data = crypto_utils.decrypt_data(session_key, file_data)
                         with open(filepath_user, 'wb') as f:
-                            f.write(decrypted_data)  # plaintext stored in user folder
+                            f.write(decrypted_data)
                     except Exception as e:
                         print(f"[ERROR] Failed to decrypt for user folder: {e}")
                         sock.send(b"ERROR: Failed to decrypt and store file.\n")
                         return
 
-                    # Save access metadata
                     self.file_access[filename] = {
                         "owner": username,
                         "allowed_users": allowed_users
@@ -236,7 +241,7 @@ class FileSharePeer:
                 self.logged_in_users.discard(logged_in_username)
             sock.close()
 
+
 if __name__ == "__main__":
     PORT = 8000
     FileSharePeer(PORT).start_peer()
-

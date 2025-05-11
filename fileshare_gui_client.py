@@ -2,7 +2,7 @@ import socket
 import os
 import tkinter as tk
 from tkinter import simpledialog, messagebox, filedialog
-import crypto_utils  
+import crypto_utils
 import json
 import base64
 
@@ -11,7 +11,8 @@ PORT = 8000
 
 session_token = None
 username = None
-derived_key = None  # 🔑 Store the per-user derived encryption key
+derived_key = None
+master_password = None
 FILE_KEYS_PATH = "file_keys.json"
 
 PINK = "#f8c8dc"
@@ -57,9 +58,8 @@ def save_encrypted_file_key(filename, file_key, allowed_users):
         file_keys = {}
 
     encrypted_keys = {}
-    salt = b'static_salt_16bytes'
     for user in allowed_users:
-        user_key = crypto_utils.derive_key_from_password(user, salt)
+        user_key = crypto_utils.get_user_derived_aes_key(user)
         encrypted_key = crypto_utils.encrypt_data(user_key, file_key)
         encrypted_keys[user] = base64.b64encode(encrypted_key).decode()
 
@@ -98,7 +98,8 @@ def register():
     messagebox.showinfo("Register", response)
 
 def login():
-    global session_token, username, derived_key
+    global session_token, username, derived_key, master_password
+
     if session_token:
         messagebox.showwarning("Already logged in", f"You're already logged in as {username}.")
         return
@@ -110,20 +111,38 @@ def login():
     if not u or not p:
         s.close()
         return
+
     username = u
     s.sendall(u.encode())
     s.recv(1024)
     s.sendall(p.encode())
-    response = s.recv(2048).decode()
-    salt = b'static_salt_16bytes'
-    derived_key = crypto_utils.derive_key_from_password(p, salt)
-    print(f"[DEBUG] Login: username: {username}")
-    print(f"[DEBUG] Derived encryption key (hex): {derived_key.hex()}")
+    response = s.recv(4096).decode()
     s.close()
+
+    try:
+        # ✅ Only change: decode base64 instead of hex
+        with open("users.json", "r") as f:
+            users = json.load(f)
+        if username not in users:
+            raise ValueError("User not found in users.json.")
+
+        password_hash_b64 = users[username]["hashed_pw"]
+        salt_b64 = users[username]["salt"]
+        password_hash = base64.b64decode(password_hash_b64)
+        salt = base64.b64decode(salt_b64)
+        derived_key = crypto_utils.derive_aes_key_from_password_hash(password_hash, salt)
+
+        print(f"[DEBUG] Login: username: {username}")
+        print(f"[DEBUG] Derived encryption key (hex): {derived_key.hex()}")
+
+    except Exception as e:
+        messagebox.showerror("Key Derivation Error", str(e))
+        return
+
     if "SESSION_TOKEN:" in response:
         session_token = response.split("SESSION_TOKEN:")[1].strip()
         os.makedirs(f"received_files_{username}", exist_ok=True)
-        messagebox.showinfo("Login", f"\U0001F389 Login successful!\n\nSession Token:\n{session_token}")
+        messagebox.showinfo("Login", f"🎉 Login successful!\n\nSession Token:\n{session_token}")
         status_label.config(text=f"Logged in as: {username}", fg="green")
     else:
         messagebox.showerror("Login Failed", response)
@@ -162,10 +181,10 @@ def upload_file(server_ip, port, token, filepath, allowed_users):
     with open(os.path.join(f"shared_files_{username}", filename), 'wb') as f:
         f.write(raw_data)
 
-    file_hash = crypto_utils.hash_data(raw_data)
+    file_hash = crypto_utils.compute_file_hash(filepath)
     os.makedirs("hashes", exist_ok=True)
     hash_file_path = os.path.join("hashes", filename + ".hash")
-    with open(hash_file_path, 'wb') as f:
+    with open(hash_file_path, 'w') as f:
         f.write(file_hash)
     print(f"[DEBUG] Hash saved at: {hash_file_path}")
 
@@ -219,23 +238,25 @@ def download():
 
     s = connect_to_server()
     s.sendall(f"DOWNLOAD {session_token} {filename}".encode())
-    data = s.recv(10_000_000)
+    encrypted_data = s.recv(10_000_000)
     s.close()
 
-    if b"ERROR" in data:
-        messagebox.showerror("Download", data.decode())
+    if b"ERROR" in encrypted_data:
+        messagebox.showerror("Download", encrypted_data.decode())
     else:
         try:
-            print(f"[DEBUG] Encrypted file size received: {len(data)} bytes")
+            print(f"[DEBUG] Encrypted file size received: {len(encrypted_data)} bytes")
             file_key = load_encrypted_file_key(filename, derived_key, username)
             print(f"[DEBUG] File key decrypted for user: {username}")
-            decrypted = crypto_utils.decrypt_data(file_key, data)
+            decrypted = crypto_utils.decrypt_data(file_key, encrypted_data)
             print(f"[DEBUG] Decrypted file size: {len(decrypted)} bytes")
             print("[DEBUG] File decryption completed successfully.")
 
             os.makedirs(f"received_files_{username}", exist_ok=True)
-            with open(os.path.join(f"received_files_{username}", filename), 'wb') as f:
+            save_path = os.path.join(f"received_files_{username}", filename)
+            with open(save_path, 'wb') as f:
                 f.write(decrypted)
+
             messagebox.showinfo("Download", f"✅ File '{filename}' decrypted and downloaded successfully.")
         except Exception as e:
             messagebox.showerror("Error", f"❌ Decryption or save failed: {str(e)}")
